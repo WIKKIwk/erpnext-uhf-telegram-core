@@ -42,6 +42,50 @@ func TestHandleEPCRequiresActiveScan(t *testing.T) {
 	}
 }
 
+func TestHandleEPCSubmitPausedSkipsQueue(t *testing.T) {
+	const epcValue = "E200001122334455"
+	c := cache.New()
+	c.Add([]string{epcValue})
+	svc := New(testConfig(), nil, c)
+
+	svc.SetScanActive(true, "unit_test")
+	svc.SetSubmitPaused(true, "unit_test")
+
+	res := svc.HandleEPC(context.Background(), epcValue, "test")
+	if res.Action != "submit_paused" {
+		t.Fatalf("expected submit_paused action, got %q", res.Action)
+	}
+
+	if q := len(svc.queue); q != 0 {
+		t.Fatalf("expected queue to stay empty while paused, got len=%d", q)
+	}
+
+	st := svc.Status()
+	if !st.SubmitPaused {
+		t.Fatal("expected submit_paused=true in stats")
+	}
+	if st.SubmitPausedN != 1 {
+		t.Fatalf("expected submit_paused_count=1, got %d", st.SubmitPausedN)
+	}
+}
+
+func TestHandleEPCResumesAfterSubmitPauseOff(t *testing.T) {
+	const epcValue = "E200001122334455"
+	c := cache.New()
+	c.Add([]string{epcValue})
+	svc := New(testConfig(), nil, c)
+
+	svc.SetScanActive(true, "unit_test")
+	svc.SetSubmitPaused(true, "unit_test")
+	_ = svc.HandleEPC(context.Background(), epcValue, "test")
+
+	svc.SetSubmitPaused(false, "unit_test")
+	res := svc.HandleEPC(context.Background(), epcValue, "test")
+	if res.Action != "queued" && res.Action != "queued_or_dropped" {
+		t.Fatalf("expected queued action after pause off, got %q", res.Action)
+	}
+}
+
 func TestSetScanActiveReplaysSeenEPCs(t *testing.T) {
 	c := cache.New()
 	c.Add([]string{"E200001122334455"})

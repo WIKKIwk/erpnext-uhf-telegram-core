@@ -33,6 +33,7 @@ func (b *Bot) handleTestFileUpload(ctx context.Context, chatID int64, sourceMess
 	if err != nil {
 		return b.sendOrEditTestPrompt(ctx, chatID, "❌ Test boshlanmadi: "+err.Error())
 	}
+	b.svc.SetSubmitPaused(true, "telegram_test_start")
 
 	// New file replaces previous test session in memory for this chat.
 	b.clearTestReadRefsForChat(chatID)
@@ -54,8 +55,12 @@ func (b *Bot) handleTestStop(ctx context.Context, chatID int64) error {
 
 	result, err := b.testMode.Stop(chatID)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "aktiv test yo'q") {
+			b.svc.SetSubmitPaused(false, "telegram_test_stop_no_active")
+		}
 		return b.sendMessage(ctx, chatID, "⚠️ "+err.Error())
 	}
+	b.svc.SetSubmitPaused(false, "telegram_test_stop")
 
 	refs := b.takeTestReadRefs(result.SessionID)
 	deleteChatID := refs.chatID
@@ -96,7 +101,7 @@ func (b *Bot) sendTestMatch(match testmode.MatchResult) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	text := fmt.Sprintf("✅ O'qildi: %s (%d/%d)", match.EPC, match.ReadCount, match.Total)
+	text := fmt.Sprintf("🧪✅ EPC o'qildi: %s (%d/%d)", match.EPC, match.ReadCount, match.Total)
 	messageID, err := b.sendMessageWithID(ctx, match.ChatID, text)
 	if err != nil {
 		return

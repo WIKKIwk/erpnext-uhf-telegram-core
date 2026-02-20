@@ -31,6 +31,7 @@ type Stats struct {
 	LastError     string    `json:"last_error,omitempty"`
 	ScanActive    bool      `json:"scan_active"`
 	ScanSince     time.Time `json:"scan_since"`
+	SubmitPaused  bool      `json:"submit_paused"`
 
 	SeenTotal      uint64 `json:"seen_total"`
 	CacheHits      uint64 `json:"cache_hits"`
@@ -38,6 +39,7 @@ type Stats struct {
 	SubmittedOK    uint64 `json:"submitted_ok"`
 	SubmitNotFound uint64 `json:"submit_not_found"`
 	SubmitErrors   uint64 `json:"submit_errors"`
+	SubmitPausedN  uint64 `json:"submit_paused_count"`
 	QueueDropped   uint64 `json:"queue_dropped"`
 	ScanInactive   uint64 `json:"scan_inactive"`
 }
@@ -48,17 +50,18 @@ type Service struct {
 	cache *cache.Store
 	queue chan string
 
-	mu          sync.Mutex
-	inflight    map[string]struct{}
-	queued      map[string]struct{}
-	recentSeen  map[string]time.Time
-	draftCount  int
-	lastRefresh time.Time
-	lastErr     string
-	scanActive  bool
-	scanSince   time.Time
-	stats       Stats
-	notifier    Notifier
+	mu           sync.Mutex
+	inflight     map[string]struct{}
+	queued       map[string]struct{}
+	recentSeen   map[string]time.Time
+	draftCount   int
+	lastRefresh  time.Time
+	lastErr      string
+	scanActive   bool
+	scanSince    time.Time
+	submitPaused bool
+	stats        Stats
+	notifier     Notifier
 }
 
 func New(cfg config.Config, erpClient *erp.Client, c *cache.Store) *Service {
@@ -78,10 +81,32 @@ func New(cfg config.Config, erpClient *erp.Client, c *cache.Store) *Service {
 		scanActive: cfg.ScanDefaultActive,
 		scanSince:  scanSince,
 		stats: Stats{
-			ScanActive: cfg.ScanDefaultActive,
-			ScanSince:  scanSince,
+			ScanActive:   cfg.ScanDefaultActive,
+			ScanSince:    scanSince,
+			SubmitPaused: false,
 		},
 	}
+}
+
+func (s *Service) SetSubmitPaused(paused bool, reason string) {
+	s.mu.Lock()
+	changed := s.submitPaused != paused
+	s.submitPaused = paused
+	s.stats.SubmitPaused = paused
+	s.mu.Unlock()
+
+	if paused {
+		s.drainQueue()
+	}
+	if changed {
+		log.Printf("[bot] submit paused=%v (%s)", paused, reason)
+	}
+}
+
+func (s *Service) SubmitPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.submitPaused
 }
 
 func (s *Service) SetNotifier(n Notifier) {
@@ -203,16 +228,25 @@ func (s *Service) HandleEPC(_ context.Context, rawEPC, _ string) IngestResult {
 
 	now := time.Now()
 	s.mu.Lock()
-	s.recentSeen[epc] = now
-	s.gcRecentSeenLocked(now)
+	if !s.submitPaused {
+		s.recentSeen[epc] = now
+		s.gcRecentSeenLocked(now)
+	}
 	s.stats.SeenTotal++
 	scanActive := s.scanActive
+	submitPaused := s.submitPaused
 	if !scanActive {
 		s.stats.ScanInactive++
+	}
+	if submitPaused {
+		s.stats.SubmitPausedN++
 	}
 	s.mu.Unlock()
 	if !scanActive {
 		return IngestResult{EPC: epc, Action: "scan_inactive"}
+	}
+	if submitPaused {
+		return IngestResult{EPC: epc, Action: "submit_paused"}
 	}
 
 	if !s.cache.Has(epc) {
@@ -276,13 +310,14 @@ func (s *Service) Status() Stats {
 	s.stats.DraftCount = s.draftCount
 	s.stats.ScanActive = s.scanActive
 	s.stats.ScanSince = s.scanSince
+	s.stats.SubmitPaused = s.submitPaused
 	return s.stats
 }
 
 func (s *Service) StatusText() string {
 	st := s.Status()
 	return fmt.Sprintf(
-		"Scan: active=%v since=%s\nCache: %d EPC (draft=%d)\nSeen: %d | hit=%d miss=%d inactive=%d\nSubmit: ok=%d not_found=%d err=%d\nLast refresh: %s (ok=%v)",
+		"Scan: active=%v since=%s\nCache: %d EPC (draft=%d)\nSeen: %d | hit=%d miss=%d inactive=%d\nSubmit: paused=%v paused_count=%d ok=%d not_found=%d err=%d\nLast refresh: %s (ok=%v)",
 		st.ScanActive,
 		formatTime(st.ScanSince),
 		st.CacheSize,
@@ -291,6 +326,8 @@ func (s *Service) StatusText() string {
 		st.CacheHits,
 		st.CacheMisses,
 		st.ScanInactive,
+		st.SubmitPaused,
+		st.SubmitPausedN,
 		st.SubmittedOK,
 		st.SubmitNotFound,
 		st.SubmitErrors,
@@ -320,6 +357,9 @@ func (s *Service) processSubmit(parent context.Context, epc string) error {
 	if epc == "" {
 		return nil
 	}
+	if s.SubmitPaused() {
+		return nil
+	}
 	if !s.cache.Has(epc) {
 		return nil
 	}
@@ -332,6 +372,9 @@ func (s *Service) processSubmit(parent context.Context, epc string) error {
 	var lastErr error
 	retries := s.cfg.SubmitRetry
 	for attempt := 0; attempt <= retries; attempt++ {
+		if s.SubmitPaused() {
+			return nil
+		}
 		ctx, cancel := context.WithTimeout(parent, s.cfg.RequestTimeout)
 		status, err := s.erp.SubmitByEPC(ctx, epc)
 		cancel()
@@ -398,6 +441,22 @@ func (s *Service) enqueue(epc string) bool {
 		s.stats.QueueDropped++
 		s.mu.Unlock()
 		return false
+	}
+}
+
+func (s *Service) drainQueue() {
+	for {
+		select {
+		case epc := <-s.queue:
+			if epc == "" {
+				continue
+			}
+			s.mu.Lock()
+			delete(s.queued, epc)
+			s.mu.Unlock()
+		default:
+			return
+		}
 	}
 }
 
