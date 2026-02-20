@@ -60,6 +60,7 @@ type Service struct {
 	scanActive   bool
 	scanSince    time.Time
 	submitPaused bool
+	epcObserver  func(epc string)
 	stats        Stats
 	notifier     Notifier
 }
@@ -112,6 +113,14 @@ func (s *Service) SubmitPaused() bool {
 func (s *Service) SetNotifier(n Notifier) {
 	s.mu.Lock()
 	s.notifier = n
+	s.mu.Unlock()
+}
+
+// SetEPCObserver registers a callback that receives every normalized EPC
+// observed by HandleEPC regardless of ingest source.
+func (s *Service) SetEPCObserver(fn func(epc string)) {
+	s.mu.Lock()
+	s.epcObserver = fn
 	s.mu.Unlock()
 }
 
@@ -225,6 +234,7 @@ func (s *Service) HandleEPC(_ context.Context, rawEPC, _ string) IngestResult {
 	if epc == "" {
 		return IngestResult{Action: "invalid", Error: "epc is empty"}
 	}
+	s.observeEPC(epc)
 
 	now := time.Now()
 	s.mu.Lock()
@@ -264,6 +274,18 @@ func (s *Service) HandleEPC(_ context.Context, rawEPC, _ string) IngestResult {
 		return IngestResult{EPC: epc, Action: "queued_or_dropped"}
 	}
 	return IngestResult{EPC: epc, Action: "queued"}
+}
+
+func (s *Service) observeEPC(epc string) {
+	if epc == "" {
+		return
+	}
+	s.mu.Lock()
+	fn := s.epcObserver
+	s.mu.Unlock()
+	if fn != nil {
+		fn(epc)
+	}
 }
 
 func (s *Service) SetScanActive(active bool, reason string) int {

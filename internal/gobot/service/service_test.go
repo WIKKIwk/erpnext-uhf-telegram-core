@@ -42,6 +42,25 @@ func TestHandleEPCRequiresActiveScan(t *testing.T) {
 	}
 }
 
+func TestHandleEPCObserverReceivesNormalizedEPC(t *testing.T) {
+	svc := New(testConfig(), nil, cache.New())
+
+	var got []string
+	svc.SetEPCObserver(func(epc string) {
+		got = append(got, epc)
+	})
+
+	_ = svc.HandleEPC(context.Background(), "e2-00 0011", "test")
+	_ = svc.HandleEPC(context.Background(), "   ", "test")
+
+	if len(got) != 1 {
+		t.Fatalf("observer call count mismatch: got=%d want=1", len(got))
+	}
+	if got[0] != "E2000011" {
+		t.Fatalf("observer epc mismatch: got=%q want=%q", got[0], "E2000011")
+	}
+}
+
 func TestHandleEPCSubmitPausedSkipsQueue(t *testing.T) {
 	const epcValue = "E200001122334455"
 	c := cache.New()

@@ -57,13 +57,11 @@ func main() {
 	var tg *telegram.Bot
 	scanner := reader.New(cfg, func(epc string) {
 		svc.HandleEPC(context.Background(), epc, "sdk")
-		if tg != nil {
-			tg.OnReaderEPC(epc)
-		}
 	}, nil)
 
 	tg = telegram.New(cfg.BotToken, cfg.RequestTimeout, cfg.PollTimeout, svc, scanner)
 	svc.SetNotifier(tg)
+	svc.SetEPCObserver(tg.OnReaderEPC)
 	scanner.SetNotifier(tg.Notify)
 
 	startupRefs := tg.SendStartupNotice(ctx, "🤖 Bot ishga tushdi. Cache yangilanmoqda...")
