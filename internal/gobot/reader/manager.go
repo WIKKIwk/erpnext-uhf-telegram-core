@@ -335,16 +335,17 @@ func (m *Manager) consumeTags(ctx context.Context, client *sdk.Client) bool {
 				m.setError(fmt.Errorf("tag channel closed"))
 				return true
 			}
-			if !tag.IsNew {
-				continue
-			}
 			epc := strings.TrimSpace(tag.EPC)
 			if epc == "" {
 				continue
 			}
 
 			m.mu.Lock()
-			m.status.UniqueSeen++
+			// Keep unique counter semantics stable, but still forward repeated EPC events.
+			// Test mode expects first read within a test session even if tag was seen earlier.
+			if tag.IsNew {
+				m.status.UniqueSeen++
+			}
 			m.status.LastTagAt = time.Now()
 			m.status.LastTagEPC = epc
 			m.mu.Unlock()
